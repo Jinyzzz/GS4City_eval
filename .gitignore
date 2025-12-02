@@ -1,0 +1,68 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+
+# PyTorch checkpoints (too large)
+*.pth
+*.pt
+*.ckpt
+
+# Data files (too large)
+*.laz
+*.las
+*.ply
+*.npy
+
+# Output directories
+outputs/
+output/
+eval_results/
+eval/
+
+# Logs
+*.log
+
+# Images
+*.png
+*.jpg
+*.jpeg
+
+# Compressed files
+*.zip
+*.tar.gz
+
+# Markdown - Only track README.md
+*.md
+!README.md
+
+# Large data directories
+zaha/
+data/
+
+# Autoencoder checkpoints
+autoencoder/ckpt/
+
+# Generated JSON outputs
+statistics.json
+metrics.json
+metrics_3d.json
+error_statistics.json
+
+# Keep configuration JSON files
+!class_mapping.json
+!class_colors.json
+!class_retention_building.json
+!window_merge.json
+!scene_reference_frame.json
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
