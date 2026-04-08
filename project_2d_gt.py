@@ -6,25 +6,11 @@ This script projects a classified point cloud (PLY) to 2D semantic segmentation 
 for each camera view, generating ground truth data suitable for evaluate_with_pointcloud_gt.py.
 
 Key Features:
-- Direct point projection with depth buffering (handles occlusion)
-- Optional hole filling (occlusion-aware recommended)
+- Direct point projection with depth buffering (handles occlusion)  [OPTIMIZED: vectorized z-buffer]
+- Optional hole filling (occlusion-aware recommended)              [OPTIMIZED: vectorized hole assignment]
+- Optional global point filtering by distance to a reference camera center (with enable/disable switch)
 - Outputs GT format required by evaluate_with_pointcloud_gt.py
 - Saves visualization PNGs for verification
-
-Usage:
-    python project_2d_gt.py \
-        --ply_path outputs/zaha_merged_labeled.ply \
-        --colmap_dir ../data/building1_15/sparse/0 \
-        --output_dir outputs/gt_semantic_maps \
-        --fill_holes nearest \
-        --save_vis
-
-Output Format (for evaluate_with_pointcloud_gt.py):
-    output_dir/
-    ├── {image_name}.npy          # (H, W) int32, -1=background, 0,1,2,...=class_id
-    ├── {image_name}_vis.png      # Visualization (colored semantic map)
-    ├── statistics.json            # Coverage and class distribution
-    └── class_colors.json          # Class color mapping
 """
 
 import argparse
@@ -40,11 +26,54 @@ from PIL import Image
 from tqdm import tqdm
 import matplotlib.pyplot as plt
 
-# Add parent directory to path to import from LangSplat
-# Get the absolute path to the parent directory (LangSplat root)
+
+# ============================================================================
+# DEFAULT PARAMETERS (used when no CLI args are provided)
+# ============================================================================
+
+DEFAULT_PLY_PATH = "zaha/zaha_goldcoast_33.ply"
+DEFAULT_COLMAP_DIR = "/workspace/LangSplat/data/subset_goldcoast/sparse/0"
+DEFAULT_OUTPUT_DIR = "gt/subset_goldcoast_33"
+
+# Resolution options
+# NOTE: Set to None by default so we won't auto-detect resolution unless you pass it.
+DEFAULT_RENDERED_FEATURES_DIR = None
+DEFAULT_TARGET_WIDTH = None
+DEFAULT_TARGET_HEIGHT = None
+
+# Point cloud options
+DEFAULT_CLASS_FIELD = "scalar_Classification"
+
+# Hole filling options
+DEFAULT_FILL_HOLES = "DEFAULT_FILL_HOLES"
+DEFAULT_FILL_DISTANCE = 10
+DEFAULT_DEPTH_DISCONTINUITY_THRESHOLD = 0.05
+
+# Projection options
+DEFAULT_MIN_DEPTH = 0.01
+DEFAULT_MAX_DEPTH = 1000.0
+
+# Output options
+DEFAULT_SAVE_VIS = True
+
+# New: global distance-based point filtering (using one reference camera)
+DEFAULT_ENABLE_DISTANCE_FILTER = False # <-- NEW SWITCH DEFAULT
+DEFAULT_DISTANCE_FILTER_CAMERA = "DJI_20241217095813_0011_D.JPG"
+DEFAULT_DISTANCE_FILTER_MIN = None
+DEFAULT_DISTANCE_FILTER_MAX = 60.0
+
+
+# ============================================================================
+# Add LangSplat to PYTHONPATH
+# ============================================================================
+
 current_dir = os.path.dirname(os.path.abspath(__file__))
-parent_dir = os.path.dirname(current_dir)
-sys.path.insert(0, parent_dir)
+repo_root = os.path.dirname(current_dir)
+langsplat_root = os.path.join(repo_root, "LangSplat")
+langsplat_root = os.path.abspath(langsplat_root)
+
+print("[INFO] Adding LangSplat root to PYTHONPATH:", langsplat_root)
+sys.path.insert(0, langsplat_root)
 
 from scene import colmap_loader
 
@@ -57,17 +86,6 @@ def load_ply_pointcloud(
     ply_path: str,
     class_field: str = 'scalar_Classification'
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """
-    Load point cloud from PLY file with classification labels.
-
-    Args:
-        ply_path: Path to PLY file
-        class_field: Name of classification field in PLY
-
-    Returns:
-        points: (N, 3) array of XYZ coordinates
-        classes: (N,) array of classification labels
-    """
     print(f"\n{'='*70}")
     print(f"Loading Point Cloud")
     print(f"{'='*70}")
@@ -79,14 +97,8 @@ def load_ply_pointcloud(
     ply_data = PlyData.read(ply_path)
     vertex = ply_data['vertex']
 
-    # Extract coordinates
-    points = np.vstack([
-        vertex['x'],
-        vertex['y'],
-        vertex['z']
-    ]).T
+    points = np.vstack([vertex['x'], vertex['y'], vertex['z']]).T
 
-    # Extract classification
     if class_field not in vertex.data.dtype.names:
         raise ValueError(
             f"Field '{class_field}' not found in PLY.\n"
@@ -119,30 +131,11 @@ def load_colmap_cameras(
     target_width: int = None,
     target_height: int = None
 ) -> Dict[str, Dict]:
-    """
-    Load COLMAP camera parameters and poses.
-
-    Args:
-        sparse_dir: Path to COLMAP sparse reconstruction (sparse/0)
-        target_width: Target image width (optional, for rescaling)
-        target_height: Target image height (optional, for rescaling)
-
-    Returns:
-        Dictionary mapping image_name to camera parameters:
-        {
-            'K': (3, 3) intrinsic matrix,
-            'R': (3, 3) rotation matrix (world to camera),
-            'T': (3,) translation vector,
-            'width': image width,
-            'height': image height
-        }
-    """
     print(f"\n{'='*70}")
     print(f"Loading COLMAP Cameras")
     print(f"{'='*70}")
     print(f"Directory: {sparse_dir}")
 
-    # Try binary first, fallback to text
     cameras_file_bin = os.path.join(sparse_dir, 'cameras.bin')
     images_file_bin = os.path.join(sparse_dir, 'images.bin')
     cameras_file_txt = os.path.join(sparse_dir, 'cameras.txt')
@@ -164,67 +157,54 @@ def load_colmap_cameras(
 
     print(f"✅ Loaded {len(cameras)} camera models, {len(images)} images")
 
-    # Build camera dictionary
     camera_dict = {}
+    original_width = None
+    original_height = None
 
     for img_data in images.values():
         cam_id = img_data.camera_id
         cam = cameras[cam_id]
 
-        # Build intrinsic matrix K
         if cam.model in ['PINHOLE', 'SIMPLE_PINHOLE']:
             if cam.model == 'PINHOLE':
                 fx, fy, cx, cy = cam.params
-            else:  # SIMPLE_PINHOLE
+            else:
                 f, cx, cy = cam.params
                 fx = fy = f
 
-            K = np.array([
-                [fx, 0, cx],
-                [0, fy, cy],
-                [0, 0, 1]
-            ], dtype=np.float64)
+            K = np.array([[fx, 0, cx],
+                          [0, fy, cy],
+                          [0, 0, 1]], dtype=np.float64)
         else:
             raise ValueError(f"Unsupported camera model: {cam.model}")
 
-        # Build extrinsics (world to camera)
         R = colmap_loader.qvec2rotmat(img_data.qvec)
         T = img_data.tvec
 
-        # Rescale camera if target resolution is specified
         original_width = cam.width
         original_height = cam.height
 
         if target_width is not None and target_height is not None:
-            # Compute scale factors
             scale_x = target_width / original_width
             scale_y = target_height / original_height
 
-            # Adjust intrinsic matrix
             K_rescaled = K.copy()
-            K_rescaled[0, 0] *= scale_x  # fx
-            K_rescaled[1, 1] *= scale_y  # fy
-            K_rescaled[0, 2] *= scale_x  # cx
-            K_rescaled[1, 2] *= scale_y  # cy
+            K_rescaled[0, 0] *= scale_x
+            K_rescaled[1, 1] *= scale_y
+            K_rescaled[0, 2] *= scale_x
+            K_rescaled[1, 2] *= scale_y
 
             camera_dict[img_data.name] = {
-                'K': K_rescaled,
-                'R': R,
-                'T': T,
-                'width': target_width,
-                'height': target_height
+                'K': K_rescaled, 'R': R, 'T': T,
+                'width': target_width, 'height': target_height
             }
         else:
             camera_dict[img_data.name] = {
-                'K': K,
-                'R': R,
-                'T': T,
-                'width': original_width,
-                'height': original_height
+                'K': K, 'R': R, 'T': T,
+                'width': original_width, 'height': original_height
             }
 
-    # Print rescaling info
-    if target_width is not None and target_height is not None:
+    if target_width is not None and target_height is not None and original_width is not None:
         print(f"📐 Rescaling: {original_width}×{original_height} → {target_width}×{target_height}")
         print(f"   Scale: {target_width/original_width:.3f}x (width), {target_height/original_height:.3f}x (height)")
 
@@ -236,15 +216,6 @@ def load_colmap_cameras(
 # ============================================================================
 
 def detect_resolution_from_rendered_features(rendered_dir: str) -> Tuple[int, int]:
-    """
-    Automatically detect target resolution from rendered feature files.
-
-    Args:
-        rendered_dir: Directory containing rendered .npy feature files
-
-    Returns:
-        (width, height) tuple
-    """
     import glob
 
     npy_files = glob.glob(os.path.join(rendered_dir, '*.npy'))
@@ -254,7 +225,6 @@ def detect_resolution_from_rendered_features(rendered_dir: str) -> Tuple[int, in
             f"Please specify --target_width and --target_height manually."
         )
 
-    # Load first file to get resolution
     first_file = npy_files[0]
     features = np.load(first_file)  # (H, W, C)
 
@@ -277,7 +247,48 @@ def detect_resolution_from_rendered_features(rendered_dir: str) -> Tuple[int, in
 
 
 # ============================================================================
-# Point Projection
+# Distance-based global point filtering (by reference camera center)
+# ============================================================================
+
+def get_camera_center_world(camera: Dict) -> np.ndarray:
+    R = camera['R']
+    T = camera['T'].reshape(3)
+    return -R.T @ T
+
+
+def filter_points_by_camera_distance(
+    points: np.ndarray,
+    classes: np.ndarray,
+    camera: Dict,
+    min_distance: float = None,
+    max_distance: float = None
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    C = get_camera_center_world(camera)
+    d = np.linalg.norm(points - C[None, :], axis=1)
+
+    mask = np.ones(len(points), dtype=bool)
+    if min_distance is not None:
+        mask &= (d >= float(min_distance))
+    if max_distance is not None:
+        mask &= (d <= float(max_distance))
+
+    return points[mask], classes[mask], mask
+
+
+def find_camera_by_name(cameras: Dict[str, Dict], name: str) -> Dict:
+    if name in cameras:
+        return cameras[name]
+
+    target_stem = Path(name).stem
+    for k, cam in cameras.items():
+        if Path(k).stem == target_stem:
+            return cam
+
+    raise KeyError(f"Reference camera '{name}' not found in COLMAP images.")
+
+
+# ============================================================================
+# Point Projection (OPTIMIZED z-buffer)
 # ============================================================================
 
 def project_points_to_camera(
@@ -290,19 +301,7 @@ def project_points_to_camera(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
     Project 3D points to 2D image using depth buffer for occlusion handling.
-
-    Args:
-        points: (N, 3) point cloud coordinates
-        classes: (N,) classification labels
-        camera: Camera parameters dict
-        min_depth: Minimum valid depth (meters)
-        max_depth: Maximum valid depth (meters)
-        background_class: Class ID for background pixels
-
-    Returns:
-        semantic_map: (H, W) semantic labels (-1 for background)
-        depth_map: (H, W) depth values (inf for invalid)
-        coverage_mask: (H, W) boolean mask of valid pixels
+    OPTIMIZED: vectorized z-buffer (no Python per-point loop).
     """
     K = camera['K']
     R = camera['R']
@@ -310,55 +309,64 @@ def project_points_to_camera(
     width = camera['width']
     height = camera['height']
 
-    # Transform points to camera coordinate system
-    # P_cam = R @ P_world + T
+    # World -> camera
     points_cam = (R @ points.T).T + T
 
-    # Filter points behind camera or too far
-    valid_depth = (points_cam[:, 2] > min_depth) & (points_cam[:, 2] < max_depth)
-    points_cam = points_cam[valid_depth]
-    classes_valid = classes[valid_depth]
-
-    if len(points_cam) == 0:
-        # No valid points for this camera
+    # Depth filter
+    z = points_cam[:, 2]
+    valid_depth = (z > min_depth) & (z < max_depth)
+    if not np.any(valid_depth):
         semantic_map = np.full((height, width), background_class, dtype=np.int32)
         depth_map = np.full((height, width), np.inf, dtype=np.float32)
         coverage_mask = np.zeros((height, width), dtype=bool)
         return semantic_map, depth_map, coverage_mask
 
-    # Project to image plane
+    points_cam = points_cam[valid_depth]
+    classes_valid = classes[valid_depth]
+    z = points_cam[:, 2]
+
     fx, fy = K[0, 0], K[1, 1]
     cx, cy = K[0, 2], K[1, 2]
 
-    depths = points_cam[:, 2]
-    u = (fx * points_cam[:, 0] / depths + cx).astype(np.int32)
-    v = (fy * points_cam[:, 1] / depths + cy).astype(np.int32)
+    u = (fx * points_cam[:, 0] / z + cx).astype(np.int32)
+    v = (fy * points_cam[:, 1] / z + cy).astype(np.int32)
 
-    # Filter points outside image bounds
+    # Image bounds filter
     valid_uv = (u >= 0) & (u < width) & (v >= 0) & (v < height)
+    if not np.any(valid_uv):
+        semantic_map = np.full((height, width), background_class, dtype=np.int32)
+        depth_map = np.full((height, width), np.inf, dtype=np.float32)
+        coverage_mask = np.zeros((height, width), dtype=bool)
+        return semantic_map, depth_map, coverage_mask
+
     u = u[valid_uv]
     v = v[valid_uv]
-    depths = depths[valid_uv]
+    depths = z[valid_uv].astype(np.float32)
     classes_valid = classes_valid[valid_uv]
 
-    # Initialize depth buffer and semantic map
-    depth_buffer = np.full((height, width), np.inf, dtype=np.float32)
-    semantic_map = np.full((height, width), background_class, dtype=np.int32)
+    # Vectorized z-buffer: keep smallest depth per pixel
+    lin = v.astype(np.int64) * int(width) + u.astype(np.int64)  # (M,)
 
-    # Depth buffering: keep closest point per pixel
-    for i in range(len(u)):
-        pixel_u, pixel_v = u[i], v[i]
-        pixel_depth = depths[i]
-        pixel_class = classes_valid[i]
+    # Sort by (pixel, depth) so first occurrence per pixel is closest
+    order = np.lexsort((depths, lin))  # primary key: lin, secondary: depths
+    lin_s = lin[order]
 
-        if pixel_depth < depth_buffer[pixel_v, pixel_u]:
-            depth_buffer[pixel_v, pixel_u] = pixel_depth
-            semantic_map[pixel_v, pixel_u] = pixel_class
+    keep = np.empty(len(order), dtype=bool)
+    keep[0] = True
+    keep[1:] = lin_s[1:] != lin_s[:-1]
+    sel = order[keep]
 
-    # Coverage mask
-    coverage_mask = depth_buffer < np.inf
+    semantic_flat = np.full(int(height) * int(width), background_class, dtype=np.int32)
+    depth_flat = np.full(int(height) * int(width), np.inf, dtype=np.float32)
 
-    return semantic_map, depth_buffer, coverage_mask
+    semantic_flat[lin[sel]] = classes_valid[sel].astype(np.int32)
+    depth_flat[lin[sel]] = depths[sel]
+
+    semantic_map = semantic_flat.reshape(height, width)
+    depth_map = depth_flat.reshape(height, width)
+    coverage_mask = depth_map < np.inf
+
+    return semantic_map, depth_map, coverage_mask
 
 
 # ============================================================================
@@ -370,17 +378,6 @@ def fill_holes_nearest_neighbor(
     coverage_mask: np.ndarray,
     max_distance: int = 5
 ) -> np.ndarray:
-    """
-    Fill holes using nearest neighbor interpolation.
-
-    Args:
-        semantic_map: (H, W) semantic labels
-        coverage_mask: (H, W) boolean mask of valid pixels
-        max_distance: Maximum distance (in pixels) to search
-
-    Returns:
-        filled_semantic_map: (H, W) with holes filled
-    """
     from scipy.ndimage import distance_transform_edt
 
     if coverage_mask.all():
@@ -407,20 +404,7 @@ def fill_holes_occlusion_aware(
     depth_discontinuity_threshold: float = 0.1
 ) -> np.ndarray:
     """
-    Fill holes while respecting occlusion boundaries.
-
-    This method detects depth discontinuities and prevents filling across
-    occlusion boundaries, ensuring only small holes are filled.
-
-    Args:
-        semantic_map: (H, W) semantic labels
-        depth_map: (H, W) depth values
-        coverage_mask: (H, W) boolean mask of valid pixels
-        max_distance: Maximum distance to fill
-        depth_discontinuity_threshold: Relative depth change for boundaries
-
-    Returns:
-        filled_semantic_map: (H, W) with occlusion-aware filling
+    OPTIMIZED: vectorized filling assignment (no Python loop over holes).
     """
     from scipy.ndimage import sobel, grey_dilation, binary_dilation
     from scipy.spatial import cKDTree
@@ -428,7 +412,6 @@ def fill_holes_occlusion_aware(
     if coverage_mask.all():
         return semantic_map.copy()
 
-    # Detect occlusion boundaries using depth gradients
     depth_valid = depth_map.copy()
     depth_valid[~coverage_mask] = np.nan
 
@@ -443,32 +426,29 @@ def fill_holes_occlusion_aware(
     occlusion_boundaries = relative_gradient > depth_discontinuity_threshold
     occlusion_boundaries = binary_dilation(occlusion_boundaries, iterations=1)
 
-    # Only use pixels away from boundaries as fill sources
     fill_source_mask = coverage_mask & ~occlusion_boundaries
-
     if not fill_source_mask.any():
         return semantic_map.copy()
 
-    # Build KD-tree of fill sources
-    source_coords = np.argwhere(fill_source_mask)
+    source_coords = np.argwhere(fill_source_mask)  # (S,2)
     tree = cKDTree(source_coords)
 
-    # Find holes
     holes = ~coverage_mask
-    hole_coords = np.argwhere(holes)
-
+    hole_coords = np.argwhere(holes)  # (Hn,2)
     if len(hole_coords) == 0:
         return semantic_map.copy()
 
-    # Query nearest neighbors
-    distances, indices = tree.query(hole_coords, k=1)
+    distances, nn_idx = tree.query(hole_coords, k=1)
 
-    # Fill within max_distance
+    within = distances <= max_distance
+    if not np.any(within):
+        return semantic_map.copy()
+
+    holes_in = hole_coords[within]              # (M,2)
+    src = source_coords[nn_idx[within]]         # (M,2)
+
     filled_semantic_map = semantic_map.copy()
-    for i, (hole_y, hole_x) in enumerate(hole_coords):
-        if distances[i] <= max_distance:
-            source_y, source_x = source_coords[indices[i]]
-            filled_semantic_map[hole_y, hole_x] = semantic_map[source_y, source_x]
+    filled_semantic_map[holes_in[:, 0], holes_in[:, 1]] = semantic_map[src[:, 0], src[:, 1]]
 
     return filled_semantic_map
 
@@ -478,15 +458,6 @@ def fill_holes_occlusion_aware(
 # ============================================================================
 
 def get_class_colors(classes: np.ndarray) -> Dict[int, Tuple[int, int, int]]:
-    """
-    Generate color mapping for classes.
-
-    Args:
-        classes: Array of unique class IDs
-
-    Returns:
-        Dictionary mapping class_id to (R, G, B) tuple
-    """
     unique_classes = np.unique(classes[classes >= 0])
     n_classes = len(unique_classes)
 
@@ -500,8 +471,7 @@ def get_class_colors(classes: np.ndarray) -> Dict[int, Tuple[int, int, int]]:
         color = cmap(i)[:3]
         class_colors[int(cls)] = tuple(int(c * 255) for c in color)
 
-    class_colors[-1] = (0, 0, 0)  # Background = black
-
+    class_colors[-1] = (0, 0, 0)
     return class_colors
 
 
@@ -509,16 +479,6 @@ def visualize_semantic_map(
     semantic_map: np.ndarray,
     class_colors: Dict[int, Tuple[int, int, int]]
 ) -> np.ndarray:
-    """
-    Convert semantic map to RGB visualization.
-
-    Args:
-        semantic_map: (H, W) integer class labels
-        class_colors: Mapping from class_id to (R, G, B)
-
-    Returns:
-        rgb_image: (H, W, 3) uint8 RGB image
-    """
     H, W = semantic_map.shape
     rgb_image = np.zeros((H, W, 3), dtype=np.uint8)
 
@@ -545,21 +505,6 @@ def process_all_cameras(
     min_depth: float = 0.01,
     max_depth: float = 100.0
 ):
-    """
-    Process all cameras and save ground truth semantic maps.
-
-    Args:
-        points: (N, 3) point cloud
-        classes: (N,) class labels
-        cameras: Camera dictionary
-        output_dir: Output directory
-        fill_holes: Hole filling method ('none', 'nearest', 'occlusion_aware')
-        fill_distance: Maximum distance for hole filling
-        depth_discontinuity_threshold: Threshold for occlusion detection
-        save_vis: Save visualization PNGs
-        min_depth: Minimum valid depth
-        max_depth: Maximum valid depth
-    """
     os.makedirs(output_dir, exist_ok=True)
 
     print(f"\n{'='*70}")
@@ -571,10 +516,8 @@ def process_all_cameras(
     print(f"Fill distance: {fill_distance} pixels")
     print()
 
-    # Generate class colors
     class_colors = get_class_colors(classes)
 
-    # Statistics
     statistics = {
         'total_images': len(cameras),
         'fill_method': fill_holes,
@@ -582,14 +525,12 @@ def process_all_cameras(
     }
 
     for img_name, camera in tqdm(cameras.items(), desc="Processing views"):
-        # Project points
         semantic_map, depth_map, coverage_mask = project_points_to_camera(
             points, classes, camera, min_depth, max_depth
         )
 
         coverage_before = coverage_mask.sum() / coverage_mask.size
 
-        # Apply hole filling
         if fill_holes == 'nearest':
             semantic_map_filled = fill_holes_nearest_neighbor(
                 semantic_map, coverage_mask, fill_distance
@@ -599,49 +540,41 @@ def process_all_cameras(
                 semantic_map, depth_map, coverage_mask,
                 fill_distance, depth_discontinuity_threshold
             )
-        else:  # 'none'
+        else:
             semantic_map_filled = semantic_map.copy()
 
-        # Use filled version for GT
         semantic_map_gt = semantic_map_filled
 
-        # Compute statistics
         valid_pixels = semantic_map_gt >= 0
         coverage_after = valid_pixels.sum() / semantic_map_gt.size
-        unique_classes, counts = np.unique(semantic_map_gt[valid_pixels], return_counts=True)
+        if np.any(valid_pixels):
+            unique_classes, counts = np.unique(semantic_map_gt[valid_pixels], return_counts=True)
+            class_hist = {int(c): int(n) for c, n in zip(unique_classes, counts)}
+        else:
+            class_hist = {}
 
         statistics['per_image'][img_name] = {
             'coverage_before_fill': float(coverage_before),
             'coverage_after_fill': float(coverage_after),
-            'classes': {int(c): int(n) for c, n in zip(unique_classes, counts)}
+            'classes': class_hist
         }
 
-        # Save ground truth semantic map (required format for evaluation)
         base_name = Path(img_name).stem
-        np.save(
-            os.path.join(output_dir, f"{base_name}.npy"),
-            semantic_map_gt
-        )
+        np.save(os.path.join(output_dir, f"{base_name}.npy"), semantic_map_gt)
 
-        # Save visualization PNG
         if save_vis:
             rgb_vis = visualize_semantic_map(semantic_map_gt, class_colors)
-            Image.fromarray(rgb_vis).save(
-                os.path.join(output_dir, f"{base_name}_vis.png")
-            )
+            Image.fromarray(rgb_vis).save(os.path.join(output_dir, f"{base_name}_vis.png"))
 
-    # Compute average statistics
-    avg_coverage_before = np.mean([s['coverage_before_fill'] for s in statistics['per_image'].values()])
-    avg_coverage_after = np.mean([s['coverage_after_fill'] for s in statistics['per_image'].values()])
+    avg_coverage_before = float(np.mean([s['coverage_before_fill'] for s in statistics['per_image'].values()]))
+    avg_coverage_after = float(np.mean([s['coverage_after_fill'] for s in statistics['per_image'].values()]))
 
-    statistics['average_coverage_before_fill'] = float(avg_coverage_before)
-    statistics['average_coverage_after_fill'] = float(avg_coverage_after)
+    statistics['average_coverage_before_fill'] = avg_coverage_before
+    statistics['average_coverage_after_fill'] = avg_coverage_after
 
-    # Save statistics
     with open(os.path.join(output_dir, 'statistics.json'), 'w') as f:
         json.dump(statistics, f, indent=2)
 
-    # Save class colors
     with open(os.path.join(output_dir, 'class_colors.json'), 'w') as f:
         json.dump({str(k): list(v) for k, v in class_colors.items()}, f, indent=2)
 
@@ -652,11 +585,6 @@ def process_all_cameras(
     print(f"Total images: {len(cameras)}")
     print(f"Average coverage (before fill): {avg_coverage_before*100:.1f}%")
     print(f"Average coverage (after fill):  {avg_coverage_after*100:.1f}%")
-    print(f"\nOutput files:")
-    print(f"  - {{image_name}}.npy: Ground truth semantic maps (H, W) int32")
-    print(f"  - {{image_name}}_vis.png: Visualization images")
-    print(f"  - statistics.json: Coverage and class statistics")
-    print(f"  - class_colors.json: Class color mapping")
     print(f"\n💡 Use these files with evaluate_with_pointcloud_gt.py")
 
 
@@ -668,90 +596,41 @@ def main():
     parser = argparse.ArgumentParser(
         description="Project 3D point cloud to 2D ground truth for LangSplat evaluation",
         formatter_class=argparse.RawDescriptionHelpFormatter,
-        epilog="""
-Examples:
-  # Basic usage
-  python project_2d_gt.py \\
-      --ply_path outputs/zaha_merged_labeled.ply \\
-      --colmap_dir ../data/building1_15/sparse/0 \\
-      --output_dir outputs/gt_semantic_maps
-
-  # With occlusion-aware hole filling (recommended)
-  python project_2d_gt.py \\
-      --ply_path outputs/zaha_merged_labeled.ply \\
-      --colmap_dir ../data/building1_15/sparse/0 \\
-      --output_dir outputs/gt_semantic_maps \\
-      --fill_holes occlusion_aware \\
-      --fill_distance 5
-
-  # Without hole filling (preserve exact point cloud coverage)
-  python project_2d_gt.py \\
-      --ply_path outputs/zaha_merged_labeled.ply \\
-      --colmap_dir ../data/building1_15/sparse/0 \\
-      --output_dir outputs/gt_semantic_maps \\
-      --fill_holes none
-
-  # Auto-detect resolution from rendered features (recommended)
-  python project_2d_gt.py \\
-      --ply_path outputs/zaha_merged_labeled.ply \\
-      --colmap_dir ../data/building1_15/sparse/0 \\
-      --output_dir outputs/gt_semantic_maps \\
-      --rendered_features_dir ../output/building1_15_dual_eval_1/test/renders_npy_eval
-
-  # Manually specify target resolution
-  python project_2d_gt.py \\
-      --ply_path outputs/zaha_merged_labeled.ply \\
-      --colmap_dir ../data/building1_15/sparse/0 \\
-      --output_dir outputs/gt_semantic_maps \\
-      --target_width 1492 \\
-      --target_height 1080
-        """
     )
 
-    # Required arguments
-    parser.add_argument('--ply_path', type=str, default="./gt_ply/b1_label.ply",
-                        help='Path to input PLY point cloud with classification')
-    parser.add_argument('--colmap_dir', type=str, default="./data/building1_15/sparse/0",
-                        help='Path to COLMAP sparse directory (sparse/0)')
-    parser.add_argument('--output_dir', type=str, default="./outputs/b1_gt_maps",
-                        help='Output directory for ground truth semantic maps')
+    parser.add_argument('--ply_path', type=str, default=DEFAULT_PLY_PATH)
+    parser.add_argument('--colmap_dir', type=str, default=DEFAULT_COLMAP_DIR)
+    parser.add_argument('--output_dir', type=str, default=DEFAULT_OUTPUT_DIR)
 
-    # Resolution options
-    parser.add_argument('--rendered_features_dir', type=str, default="/LangSplat/output/building1_15/test/ours_None/renders_npy",
-                        help='Directory with rendered features to auto-detect resolution')
-    parser.add_argument('--target_width', type=int, default=None,
-                        help='Target output width (overrides auto-detection)')
-    parser.add_argument('--target_height', type=int, default=None,
-                        help='Target output height (overrides auto-detection)')
+    parser.add_argument('--rendered_features_dir', type=str, default=DEFAULT_RENDERED_FEATURES_DIR)
+    parser.add_argument('--target_width', type=int, default=DEFAULT_TARGET_WIDTH)
+    parser.add_argument('--target_height', type=int, default=DEFAULT_TARGET_HEIGHT)
 
-    # Point cloud options
-    parser.add_argument('--class_field', type=str, default='scalar_Classification',
-                        help='Name of classification field in PLY (default: scalar_Classification)')
+    parser.add_argument('--class_field', type=str, default=DEFAULT_CLASS_FIELD)
 
-    # Hole filling options
-    parser.add_argument('--fill_holes', type=str, default='nearest',
-                        choices=['none', 'nearest', 'occlusion_aware'],
-                        help='Hole filling method (default: nearest)')
-    parser.add_argument('--fill_distance', type=int, default=5,
-                        help='Maximum distance for hole filling in pixels (default: 5)')
-    parser.add_argument('--depth_discontinuity_threshold', type=float, default=0.1,
-                        help='Relative depth change threshold for occlusion detection (default: 0.1)')
+    # NEW: switch to enable/disable distance filtering (other defaults unchanged)
+    parser.add_argument('--enable_distance_filter', action='store_true', default=DEFAULT_ENABLE_DISTANCE_FILTER,
+                        help='Enable global distance filtering before generating GT (default: enabled).')
+    parser.add_argument('--disable_distance_filter', action='store_false', dest='enable_distance_filter',
+                        help='Disable global distance filtering.')
 
-    # Projection options
-    parser.add_argument('--min_depth', type=float, default=0.01,
-                        help='Minimum valid depth in meters (default: 0.01)')
-    parser.add_argument('--max_depth', type=float, default=100.0,
-                        help='Maximum valid depth in meters (default: 100.0)')
+    parser.add_argument('--distance_filter_camera', type=str, default=DEFAULT_DISTANCE_FILTER_CAMERA)
+    parser.add_argument('--distance_filter_min', type=float, default=DEFAULT_DISTANCE_FILTER_MIN)
+    parser.add_argument('--distance_filter_max', type=float, default=DEFAULT_DISTANCE_FILTER_MAX)
 
-    # Output options
-    parser.add_argument('--save_vis', action='store_true', default=True,
-                        help='Save visualization PNGs (default: True)')
-    parser.add_argument('--no_vis', action='store_false', dest='save_vis',
-                        help='Do not save visualization PNGs')
+    parser.add_argument('--fill_holes', type=str, default=DEFAULT_FILL_HOLES,
+                        choices=['none', 'nearest', 'occlusion_aware'])
+    parser.add_argument('--fill_distance', type=int, default=DEFAULT_FILL_DISTANCE)
+    parser.add_argument('--depth_discontinuity_threshold', type=float, default=DEFAULT_DEPTH_DISCONTINUITY_THRESHOLD)
+
+    parser.add_argument('--min_depth', type=float, default=DEFAULT_MIN_DEPTH)
+    parser.add_argument('--max_depth', type=float, default=DEFAULT_MAX_DEPTH)
+
+    parser.add_argument('--save_vis', action='store_true', default=DEFAULT_SAVE_VIS)
+    parser.add_argument('--no_vis', action='store_false', dest='save_vis')
 
     args = parser.parse_args()
 
-    # Print configuration
     print(f"\n{'='*70}")
     print(f"Project 2D Ground Truth for LangSplat Evaluation")
     print(f"{'='*70}")
@@ -763,30 +642,50 @@ Examples:
     print(f"  Fill method:     {args.fill_holes}")
     print(f"  Fill distance:   {args.fill_distance} pixels")
     print(f"  Save vis:        {args.save_vis}")
+    print(f"  Enable distance filter: {args.enable_distance_filter}")
+    print(f"  Distance filter camera: {args.distance_filter_camera}")
+    print(f"  Distance filter min:    {args.distance_filter_min}")
+    print(f"  Distance filter max:    {args.distance_filter_max}")
 
-    # Determine target resolution
     target_width = args.target_width
     target_height = args.target_height
 
     if target_width is not None and target_height is not None:
-        # Manual resolution specified
         print(f"  Target resolution: {target_width}×{target_height} (manual)")
     elif args.rendered_features_dir is not None:
-        # Auto-detect from rendered features
-        target_width, target_height = detect_resolution_from_rendered_features(
-            args.rendered_features_dir
-        )
+        target_width, target_height = detect_resolution_from_rendered_features(args.rendered_features_dir)
     else:
-        # Use original COLMAP resolution
         print(f"  Target resolution: Original COLMAP resolution (no rescaling)")
 
-    # Load point cloud
     points, classes = load_ply_pointcloud(args.ply_path, args.class_field)
-
-    # Load cameras (with optional rescaling)
     cameras = load_colmap_cameras(args.colmap_dir, target_width, target_height)
 
-    # Process all cameras
+    # Global filtering of points by distance to one reference camera (now switchable)
+    if args.enable_distance_filter and (args.distance_filter_camera is not None) and (
+        args.distance_filter_min is not None or args.distance_filter_max is not None
+    ):
+        ref_cam = find_camera_by_name(cameras, args.distance_filter_camera)
+
+        points_before = len(points)
+        points, classes, _mask = filter_points_by_camera_distance(
+            points, classes, ref_cam,
+            min_distance=args.distance_filter_min,
+            max_distance=args.distance_filter_max
+        )
+
+        print(f"\n{'='*70}")
+        print("Distance-based Point Filtering (Global)")
+        print(f"{'='*70}")
+        print(f"Reference camera: {args.distance_filter_camera}")
+        print(f"Min dist (m):     {args.distance_filter_min}")
+        print(f"Max dist (m):     {args.distance_filter_max}")
+        if points_before > 0:
+            print(f"Kept points:      {len(points):,} / {points_before:,} ({len(points)/points_before*100:.1f}%)")
+        else:
+            print("Kept points:      0 / 0")
+    elif not args.enable_distance_filter:
+        print(f"\n[INFO] Distance filtering disabled by switch (--disable_distance_filter).")
+
     process_all_cameras(
         points, classes, cameras, args.output_dir,
         fill_holes=args.fill_holes,

@@ -1,7 +1,7 @@
 """
 Convert LAZ/LAS point cloud(s) from a locally shifted CRS to
-UTM32 (EPSG:25832) by applying a translation, then reproject it
-to a Gauss–Krüger CRS (default EPSG:31468, zone 4).
+ETRS89 / UTM32N (EPSG:25832) by applying a translation, and optionally
+reproject it to another CRS (e.g. Gauss–Krüger EPSG:31468).
 
 The script preserves XYZ coordinates and the classification label,
 and writes the result as a binary PLY file with fields: x, y, z, class.
@@ -57,12 +57,10 @@ def voxel_grid_filter(xyz, cls, voxel_size=0.05):
     )
 
     # Sort by hash and then by class (to prefer rare classes)
-    # This ensures that within each voxel, points with smaller class IDs come first
     sort_idx = np.lexsort((cls, voxel_hash))
     sorted_hash = voxel_hash[sort_idx]
 
-    # Find first occurrence of each unique hash (this is the point we keep)
-    # Using np.unique with return_index on sorted array is much faster
+    # Find first occurrence of each unique hash
     _, unique_idx = np.unique(sorted_hash, return_index=True)
 
     # Map back to original indices
@@ -274,7 +272,7 @@ def process_laz_to_ply(
     in_path: str,
     out_path: str,
     shift_xyz=(690826.0, 5335877.0, 500.0),
-    target_epsg=32632,
+    target_epsg=25832,
     chunk_size=2_000_000,
     downsample_strategy='none',
     downsample_ratio=0.2,
@@ -288,7 +286,7 @@ def process_laz_to_ply(
     Convert LAZ/LAS to PLY with:
     1. Optional downsampling (uniform, voxel, or class-aware)
     2. A fixed translation to restore ETRS89/UTM32 (EPSG:25832),
-    3. Reprojection to WGS84/UTM32N (EPSG:32632),
+    3. Optional reprojection to another CRS (if target_epsg != 25832),
     4. Optional scene reference frame transformation (final shift),
     5. Streaming binary PLY writing with progress display.
 
@@ -301,8 +299,11 @@ def process_laz_to_ply(
 
     print(f"\n[INFO] Input file: {in_path}")
     print(f"[INFO] Total points (confirmed): {n_points:,}")
-    print(f"[INFO] Translation (local → UTM32): {shift_xyz}")
-    print(f"[INFO] Reprojection: EPSG:25832 → EPSG:{target_epsg}")
+    print(f"[INFO] Translation (local → UTM32 / EPSG:25832): {shift_xyz}")
+    if target_epsg == 25832:
+        print(f"[INFO] No CRS reprojection (staying in EPSG:25832 after translation)")
+    else:
+        print(f"[INFO] Reprojection: EPSG:25832 → EPSG:{target_epsg}")
     if scene_ref_shift:
         print(f"[INFO] Scene reference shift: {scene_ref_shift}")
     print(f"[INFO] Downsampling strategy: {downsample_strategy}")
@@ -316,8 +317,11 @@ def process_laz_to_ply(
             print(f"[INFO]   - Default class rate: {default_class_rate:.2%}")
     print(f"[INFO] Output file: {out_path}\n")
 
-    # Build CRS transformer (ETRS89/UTM32 EPSG:25832 → WGS84/UTM32N EPSG:32632)
-    transformer = Transformer.from_crs(25832, target_epsg, always_xy=True)
+    # Build CRS transformer only if requested
+    if target_epsg == 25832:
+        transformer = None
+    else:
+        transformer = Transformer.from_crs(25832, target_epsg, always_xy=True)
 
     # Define binary layout for each vertex in PLY
     ply_dtype = np.dtype([
@@ -389,26 +393,29 @@ def process_laz_to_ply(
 
                 downsampled_points += n
 
-                # (1) Apply translation to get geo-registered UTM32 coordinates
+                # (1) Apply translation to get geo-registered UTM32 coordinates (EPSG:25832)
                 x += shift_xyz[0]
                 y += shift_xyz[1]
                 z += shift_xyz[2]
 
-                # (2) Reproject to WGS84/UTM32N (horizontal only)
-                x_gk, y_gk = transformer.transform(x, y)
-                z_gk = z  # keep vertical value as is
+                # (2) Optional reprojection (horizontal only)
+                if transformer is None:
+                    x_out, y_out, z_out = x, y, z
+                else:
+                    x_out, y_out = transformer.transform(x, y)
+                    z_out = z  # keep vertical value as is
 
                 # (3) Apply scene reference frame shift (if provided)
                 if scene_ref_shift is not None:
-                    x_gk += scene_ref_shift[0]
-                    y_gk += scene_ref_shift[1]
-                    z_gk += scene_ref_shift[2]
+                    x_out += scene_ref_shift[0]
+                    y_out += scene_ref_shift[1]
+                    z_out += scene_ref_shift[2]
 
                 # Prepare structured array for binary writing
                 vert = np.empty(n, dtype=ply_dtype)
-                vert['x'] = x_gk.astype(np.float32, copy=False)
-                vert['y'] = y_gk.astype(np.float32, copy=False)
-                vert['z'] = z_gk.astype(np.float32, copy=False)
+                vert['x'] = x_out.astype(np.float32, copy=False)
+                vert['y'] = y_out.astype(np.float32, copy=False)
+                vert['z'] = z_out.astype(np.float32, copy=False)
                 vert['class'] = cls
 
                 # Write this chunk to the temporary binary file
@@ -479,7 +486,7 @@ def process_multiple_laz_to_ply(
     input_files: list,
     out_path: str,
     shift_xyz=(690826.0, 5335877.0, 500.0),
-    target_epsg=32632,
+    target_epsg=25832,
     chunk_size=2_000_000,
     downsample_strategy='none',
     downsample_ratio=0.2,
@@ -502,6 +509,11 @@ def process_multiple_laz_to_ply(
     print(f" Input files: {len(input_files)}")
     print(f" Output file: {out_path}")
     print(f" Downsampling strategy: {downsample_strategy}")
+    print(f" Translation (local → UTM32 / EPSG:25832): {shift_xyz}")
+    if target_epsg == 25832:
+        print(f" No CRS reprojection (staying in EPSG:25832 after translation)")
+    else:
+        print(f" Reprojection: EPSG:25832 → EPSG:{target_epsg}")
     print(f"{'='*80}\n")
 
     # Display all input files
@@ -513,7 +525,10 @@ def process_multiple_laz_to_ply(
     print(f"\n  Total size: {total_size:,.1f} MB\n")
 
     # Build CRS transformer (shared across all files)
-    transformer = Transformer.from_crs(25832, target_epsg, always_xy=True)
+    if target_epsg == 25832:
+        transformer = None
+    else:
+        transformer = Transformer.from_crs(25832, target_epsg, always_xy=True)
 
     # Define binary layout for PLY
     ply_dtype = np.dtype([
@@ -610,26 +625,29 @@ def process_multiple_laz_to_ply(
                         downsampled_points += n
 
                         # Apply transformations
-                        # (1) Translation
+                        # (1) Translation (local → EPSG:25832)
                         x += shift_xyz[0]
                         y += shift_xyz[1]
                         z += shift_xyz[2]
 
-                        # (2) Reprojection
-                        x_gk, y_gk = transformer.transform(x, y)
-                        z_gk = z
+                        # (2) Optional reprojection
+                        if transformer is None:
+                            x_out, y_out, z_out = x, y, z
+                        else:
+                            x_out, y_out = transformer.transform(x, y)
+                            z_out = z
 
                         # (3) Scene reference shift
                         if scene_ref_shift is not None:
-                            x_gk += scene_ref_shift[0]
-                            y_gk += scene_ref_shift[1]
-                            z_gk += scene_ref_shift[2]
+                            x_out += scene_ref_shift[0]
+                            y_out += scene_ref_shift[1]
+                            z_out += scene_ref_shift[2]
 
                         # Prepare structured array
                         vert = np.empty(n, dtype=ply_dtype)
-                        vert['x'] = x_gk.astype(np.float32, copy=False)
-                        vert['y'] = y_gk.astype(np.float32, copy=False)
-                        vert['z'] = z_gk.astype(np.float32, copy=False)
+                        vert['x'] = x_out.astype(np.float32, copy=False)
+                        vert['y'] = y_out.astype(np.float32, copy=False)
+                        vert['z'] = z_out.astype(np.float32, copy=False)
                         vert['class'] = cls
 
                         # Write to temporary file
@@ -704,7 +722,7 @@ def process_multiple_laz_to_ply(
 def main():
     parser = argparse.ArgumentParser(
         description="Apply translation to restore ETRS89/UTM32 (EPSG:25832), "
-                    "then reproject to WGS84/UTM32N (EPSG:32632) and export PLY with progress. "
+                    "optionally reproject to another CRS and export PLY with progress. "
                     "Supports single file, directory, or glob pattern for multi-file processing."
     )
     parser.add_argument("--in", dest="in_path", default="./zaha/laz_clouds_for_visualisation",
@@ -713,8 +731,9 @@ def main():
     parser.add_argument("--shift_x", type=float, default=690826.0, help="Translation (X) in meters")
     parser.add_argument("--shift_y", type=float, default=5335877.0, help="Translation (Y) in meters")
     parser.add_argument("--shift_z", type=float, default=500.0, help="Translation (Z) in meters")
-    parser.add_argument("--target_epsg", type=int, default=32632,
-                        help="Target CRS EPSG code (default: 32632 = WGS84/UTM32N)")
+    parser.add_argument("--target_epsg", type=int, default=25832,
+                        help="Target CRS EPSG code (default: 25832 = ETRS89 / UTM32N; "
+                             "if different from 25832, a reprojection from 25832 will be applied)")
     parser.add_argument("--chunk", type=int, default=2_000_000,
                         help="Number of points per processing chunk")
 

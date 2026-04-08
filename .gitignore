@@ -22,6 +22,10 @@ outputs/
 output/
 eval_results/
 eval/
+zaha/
+gt/
+archiv/
+GroundingDINO/
 
 # Logs
 *.log
