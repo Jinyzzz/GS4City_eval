@@ -10,7 +10,9 @@ This repository provides a unified evaluation pipeline for three semantic segmen
 
 The pipeline resolves differences in output formats (semantic labels, instance masks, open-vocabulary predictions) and enables consistent evaluation under a shared label space.
 
-This codebase is developed based on [zaha_eval](https://github.com/zqlin0521/zaha_eval).
+This codebase is developed based on [CityGML2Mask](https://github.com/Jinyzzz/CityGML2Mask).
+
+The Zaha dataset used in this project is sourced from [Zaha Dataset Repository](https://github.com/OloOcki/zaha).
 
 
 ---
