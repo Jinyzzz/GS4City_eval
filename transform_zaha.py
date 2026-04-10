@@ -745,13 +745,13 @@ def main():
                         help="Retention ratio for uniform downsampling (0.0-1.0, default: 0.2)")
     parser.add_argument("--voxel_size", type=float, default=0.05,
                         help="Voxel size in meters for voxel grid filtering (default: 0.05)")
-    parser.add_argument("--class_config", type=str, default="class_retention_building.json",
+    parser.add_argument("--class_config", type=str, default="config/class_retention_building.json",
                         help="JSON file with class retention rates (for class_aware strategy)")
     parser.add_argument("--default_class_rate", type=float, default=0.1,
                         help="Default retention rate for unlisted classes (default: 0.1)")
 
     # Scene reference frame transformation
-    parser.add_argument("--scene_ref_json", type=str, default="scene_reference_frame.json",
+    parser.add_argument("--scene_ref_json", type=str, default="config/scene_reference_frame.json",
                         help="Path to scene_reference_frame.json for final coordinate transformation")
 
     args = parser.parse_args()

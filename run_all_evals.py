@@ -2,7 +2,7 @@
 # -*- coding: utf-8 -*-
 
 """
-Run unified 2-level evaluation for three methods in ONE command.
+Run unified 2-level evaluation for multiple methods in one command.
 
 Levels:
   1) whole: building-only binary evaluation
@@ -14,96 +14,14 @@ Methods:
   3) Gaussian Grouping + GroundingDINO
 
 GT logic:
-  - DO NOT use fused GT
+  - do not use fused GT
   - use zaha GT + ai GT
   - fuse them with zaha priority
   - whole GT is derived from fused fine GT as building-only binary GT
   - part GT is the fused fine GT itself
 """
 
-# =========================================================
-# ====================== CONFIG START =====================
-# =========================================================
-
-# -------------------------
-# Shared files / folders
-# -------------------------
-CLASS_MAPPING_PATH = "/workspace/zaha_eval/class_mapping.json"
-GT_SPLIT_ROOT = "/workspace/zaha_eval/gt/subset1_499_test"
-CLASS_COLORS_PATH = "/workspace/zaha_eval/class_colors.json"
-
-ROOT_OUTPUT_DIR = "/workspace/zaha_eval/all_eval_1_ab5"
-
-SAVE_VISUALIZATIONS = True
-SAVE_CROSS_METHOD_PANELS = True
-NUM_IMAGES = None   # e.g. 10 for debug, None for all
-
-# -------------------------
-# Whole visualization ids
-# -------------------------
-WHOLE_BUILDING_ID = 200
-WHOLE_NONBUILDING_ID = 201
-
-# Fine ids
-WHOLE_BUILDING_FINE_IDS = [1, 2, 3, 12]
-WHOLE_NONBUILD_FINE_IDS = [101, 103, 104]
-
-RGB_IMAGE_DIR = "/workspace/CityGMLGaussian/dataset/subset_building1/images"
-
-# -------------------------
-# CityGML + CLIP
-# -------------------------
-RUN_CITYGML_CLIP = True
-
-CITY_INSTANCE_IMAGES_DIR = "/workspace/CityGMLGaussian/output/subset_building1_ab5_30000/test/ours_30000/objects_test"
-CITY_MODEL_ROOT = "/workspace/CityGMLGaussian/output/subset_building1_ab5_30000"
-
-CITY_CLIP_THRESHOLD = 0.2
-CITY_OPENCLIP_MODEL_NAME = "ViT-B-16"
-CITY_OPENCLIP_PRETRAINED = "laion2b_s34b_b88k"
-
-# None => use built-in default map
-CITYGML_CLASS_MAP_PATH = None
-
-# -------------------------
-# LangSplat
-# -------------------------
-RUN_LANGSPLAT = False
-
-LANG_RENDERED_FEATURES_DIR = "/workspace/LangSplat/output/subset_building8_lang_30000/test/ours_None/renders_npy"
-LANG_AE_CHECKPOINT = "/workspace/LangSplat/autoencoder/ckpt/subset_building8/best_ckpt.pth"
-
-LANG_WHOLE_MASK_THRESH = 0.35
-LANG_PART_MASK_THRESH = 0.5
-LANG_USE_SOFTMAX = False
-LANG_ENCODER_DIMS = [256, 128, 64, 32, 3]
-LANG_DECODER_DIMS = [16, 32, 64, 128, 256, 256, 512]
-
-# -------------------------
-# Gaussian Grouping + DINO
-# -------------------------
-RUN_GAGA_DINO = False
-
-GAGA_IMAGES_DIR = "/workspace/CityGMLGaussian/dataset/subset_building8_gaga/images"
-GAGA_PRED_INST_DIR = "/workspace/CityGMLGaussian/output/subset_building8_gaga_30000/test/ours_30000/objects_test"
-
-DINO_CONFIG = "/workspace/zaha_eval/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
-DINO_CHECKPOINT = "/workspace/zaha_eval/GroundingDINO/weights/groundingdino_swint_ogc.pth"
-
-DINO_BOX_THRESH = 0.25
-DINO_TEXT_THRESH = 0.20
-DINO_INSTANCE_MIN_OVERLAP = 0.30
-DINO_INSTANCE_MIN_SCORE = 0.20
-
-# -------------------------
-# Optional summary name
-# -------------------------
-SUMMARY_FILENAME = "summary_all_methods.json"
-
-# =========================================================
-# ======================= CONFIG END ======================
-# =========================================================
-
+import argparse
 import os
 import json
 import glob
@@ -126,19 +44,86 @@ from common_eval import (
     require_complete_gt_pair,
 )
 
-# -------------------------
-# External dependencies
-# -------------------------
 import open_clip
-
-# LangSplat
-import colormaps  # noqa: F401
 from autoencoder.model import Autoencoder
-from openclip_encoder import OpenCLIPNetwork
-
-# GroundingDINO
+from GS_eval.autoencoder.openclip_encoder import OpenCLIPNetwork
 from GroundingDINO.groundingdino.util.inference import load_model as dino_load_model
 from GroundingDINO.groundingdino.util.inference import predict as dino_predict
+
+
+# =========================================================
+# Default configuration
+# =========================================================
+
+DEFAULT_CLASS_MAPPING_PATH = "/workspace/zaha_eval/config/class_mapping.json"
+DEFAULT_GT_SPLIT_ROOT = "/workspace/zaha_eval/gt/subset1_499_test"
+DEFAULT_CLASS_COLORS_PATH = "/workspace/zaha_eval/config/class_colors.json"
+DEFAULT_ROOT_OUTPUT_DIR = "/workspace/zaha_eval/all_eval_1_ab5"
+
+DEFAULT_SAVE_VISUALIZATIONS = True
+DEFAULT_SAVE_CROSS_METHOD_PANELS = True
+DEFAULT_NUM_IMAGES = None
+
+DEFAULT_WHOLE_BUILDING_ID = 200
+DEFAULT_WHOLE_NONBUILDING_ID = 201
+
+DEFAULT_WHOLE_BUILDING_FINE_IDS = [1, 2, 3, 12]
+DEFAULT_WHOLE_NONBUILD_FINE_IDS = [101, 103, 104]
+
+DEFAULT_RGB_IMAGE_DIR = "/workspace/CityGMLGaussian/dataset/subset_building1/images"
+
+DEFAULT_RUN_CITYGML_CLIP = True
+DEFAULT_CITY_INSTANCE_IMAGES_DIR = "/workspace/CityGMLGaussian/output/subset_building1_ab5_30000/test/ours_30000/objects_test"
+DEFAULT_CITY_MODEL_ROOT = "/workspace/CityGMLGaussian/output/subset_building1_ab5_30000"
+DEFAULT_CITY_CLIP_THRESHOLD = 0.2
+DEFAULT_CITY_OPENCLIP_MODEL_NAME = "ViT-B-16"
+DEFAULT_CITY_OPENCLIP_PRETRAINED = "laion2b_s34b_b88k"
+DEFAULT_CITYGML_CLASS_MAP_PATH = None
+
+DEFAULT_RUN_LANGSPLAT = False
+DEFAULT_LANG_RENDERED_FEATURES_DIR = "/workspace/LangSplat/output/subset_building8_lang_30000/test/ours_None/renders_npy"
+DEFAULT_LANG_AE_CHECKPOINT = "/workspace/LangSplat/autoencoder/ckpt/subset_building8/best_ckpt.pth"
+DEFAULT_LANG_WHOLE_MASK_THRESH = 0.35
+DEFAULT_LANG_PART_MASK_THRESH = 0.5
+DEFAULT_LANG_USE_SOFTMAX = False
+DEFAULT_LANG_ENCODER_DIMS = [256, 128, 64, 32, 3]
+DEFAULT_LANG_DECODER_DIMS = [16, 32, 64, 128, 256, 256, 512]
+
+DEFAULT_RUN_GAGA_DINO = False
+DEFAULT_GAGA_IMAGES_DIR = "/workspace/CityGMLGaussian/dataset/subset_building8_gaga/images"
+DEFAULT_GAGA_PRED_INST_DIR = "/workspace/CityGMLGaussian/output/subset_building8_gaga_30000/test/ours_30000/objects_test"
+DEFAULT_DINO_CONFIG = "/workspace/zaha_eval/GroundingDINO/groundingdino/config/GroundingDINO_SwinT_OGC.py"
+DEFAULT_DINO_CHECKPOINT = "/workspace/zaha_eval/GroundingDINO/weights/groundingdino_swint_ogc.pth"
+DEFAULT_DINO_BOX_THRESH = 0.25
+DEFAULT_DINO_TEXT_THRESH = 0.20
+DEFAULT_DINO_INSTANCE_MIN_OVERLAP = 0.30
+DEFAULT_DINO_INSTANCE_MIN_SCORE = 0.20
+
+DEFAULT_SUMMARY_FILENAME = "summary_all_methods.json"
+DEFAULT_STABILITY_IDS = [101, 103, 104]
+
+
+# =========================================================
+# Helpers
+# =========================================================
+
+def parse_int_list(value: Optional[str]) -> Optional[List[int]]:
+    if value is None:
+        return None
+    value = str(value).strip()
+    if value == "":
+        return []
+    return [int(v.strip()) for v in value.split(",") if v.strip()]
+
+
+def parse_bool_flag_pair(enable_flag: bool, disable_flag: bool, default: bool) -> bool:
+    if enable_flag and disable_flag:
+        raise ValueError("Conflicting flags: both enable and disable were specified.")
+    if enable_flag:
+        return True
+    if disable_flag:
+        return False
+    return default
 
 
 # =========================================================
@@ -166,9 +151,9 @@ class BasePredictor:
 # =========================================================
 class CityGMLSemanticIndex:
     def __init__(self, id_mapping_path: str, city_semantics_path: str):
-        with open(id_mapping_path, "r") as f:
+        with open(id_mapping_path, "r", encoding="utf-8") as f:
             self.instance_to_city_id: Dict[str, str] = json.load(f)
-        with open(city_semantics_path, "r") as f:
+        with open(city_semantics_path, "r", encoding="utf-8") as f:
             self.city_semantics: Dict[str, Dict] = json.load(f)
 
         self.city_id_to_type: Dict[str, str] = {}
@@ -220,7 +205,8 @@ class CityGMLSemanticIndex:
         class_id_to_sorted_types: Dict[int, List[str]] = {}
         for cid, types in citygml_class_map.items():
             class_id_to_sorted_types[cid] = sorted(
-                types, key=lambda t: type_priority.index(t) if t in type_priority else len(type_priority)
+                types,
+                key=lambda t: type_priority.index(t) if t in type_priority else len(type_priority),
             )
 
         instance_to_class: Dict[int, int] = {}
@@ -286,7 +272,7 @@ class CLIPInstanceIndex:
         elif isinstance(loaded, np.ndarray):
             arr = loaded.astype(np.float32)
             norms = np.linalg.norm(arr, axis=1, keepdims=True)
-            valid = (norms.squeeze(-1) > 1e-8)
+            valid = norms.squeeze(-1) > 1e-8
             arr_norm = np.zeros_like(arr)
             arr_norm[valid] = arr[valid] / norms[valid]
             self.instance_mean_features = {int(i): arr_norm[i] for i in np.where(valid)[0] if int(i) != 0}
@@ -458,7 +444,7 @@ class CityGMLClipPredictor(BasePredictor):
     def list_image_names(self):
         files = sorted(glob.glob(os.path.join(self.instance_images_dir, "*.png")))
         if self.num_images:
-            files = files[: self.num_images]
+            files = files[:self.num_images]
         return [Path(f).stem for f in files]
 
     def required_paths(self, image_name: str) -> List[Dict]:
@@ -541,7 +527,7 @@ class LangSplatPredictor(BasePredictor):
     def list_image_names(self):
         files = sorted(glob.glob(os.path.join(self.rendered_features, "*.npy")))
         if self.num_images:
-            files = files[: self.num_images]
+            files = files[:self.num_images]
         return [Path(f).stem for f in files]
 
     def required_paths(self, image_name: str) -> List[Dict]:
@@ -564,14 +550,14 @@ class LangSplatPredictor(BasePredictor):
         return queries, np.array(qids, dtype=np.int32)
 
     def decode_features(self, compressed_features):
-        H, W, _ = compressed_features.shape
+        h, w, _ = compressed_features.shape
         with torch.no_grad():
             flat = compressed_features.reshape(-1, 3).to(self.device)
-            decoded = self.autoencoder.decode(flat).reshape(H, W, 512)
+            decoded = self.autoencoder.decode(flat).reshape(h, w, 512)
         return decoded
 
     def query_semantic_map(self, features_512, queries):
-        H, W, _ = features_512.shape
+        h, w, _ = features_512.shape
         self.clip_model.set_positives(queries)
         features_input = features_512.unsqueeze(0)
 
@@ -584,11 +570,11 @@ class LangSplatPredictor(BasePredictor):
             confidence = torch.max(probs, dim=0)[0].cpu().numpy()
         else:
             argmax_class = relevance_maps.argmax(dim=0).cpu().numpy()
-            confidence = np.zeros((H, W), dtype=np.float32)
+            confidence = np.zeros((h, w), dtype=np.float32)
             for i in range(len(queries)):
                 rel = relevance_maps[i].cpu().numpy()
                 rel_norm = (rel - rel.min()) / (rel.max() - rel.min() + 1e-9)
-                mask = (argmax_class == i)
+                mask = argmax_class == i
                 confidence[mask] = rel_norm[mask]
             pred_class = argmax_class
 
@@ -602,12 +588,10 @@ class LangSplatPredictor(BasePredictor):
         compressed = torch.from_numpy(np.load(feat_path)).float()
         decoded = self.decode_features(compressed)
 
-        # whole: building prompt only
         raw_idx_w, conf_w = self.query_semantic_map(decoded, self.whole_queries)
         pred_whole = np.full_like(raw_idx_w, -1, dtype=np.int32)
         pred_whole[conf_w >= self.whole_mask_thresh] = 1
 
-        # part: full fine classes
         raw_idx_p, conf_p = self.query_semantic_map(decoded, self.part_queries)
         pred_part = np.full_like(raw_idx_p, -1, dtype=np.int32)
         valid_p = raw_idx_p >= 0
@@ -675,7 +659,7 @@ class GaussianGroupingDINOPredictor(BasePredictor):
     def list_image_names(self):
         files = sorted(glob.glob(os.path.join(self.pred_inst_dir, "*.png")))
         if self.num_images:
-            files = files[: self.num_images]
+            files = files[:self.num_images]
         return [Path(f).stem for f in files]
 
     def _rgb_candidates(self, image_name: str) -> List[str]:
@@ -778,7 +762,7 @@ class GaussianGroupingDINOPredictor(BasePredictor):
         if boxes.size == 0:
             return np.zeros((0, 4), dtype=np.float32), np.zeros((0,), dtype=np.float32)
 
-        H0, W0 = image_rgb.shape[:2]
+        h0, w0 = image_rgb.shape[:2]
 
         if np.max(boxes) <= 1.5:
             boxes_scaled = boxes.copy()
@@ -801,8 +785,8 @@ class GaussianGroupingDINOPredictor(BasePredictor):
         else:
             boxes_xyxy = boxes_scaled
 
-        sx = W0 / float(new_w)
-        sy = H0 / float(new_h)
+        sx = w0 / float(new_w)
+        sy = h0 / float(new_h)
         boxes_xyxy[:, [0, 2]] *= sx
         boxes_xyxy[:, [1, 3]] *= sy
 
@@ -811,10 +795,10 @@ class GaussianGroupingDINOPredictor(BasePredictor):
         x2 = np.maximum(boxes_xyxy[:, 0], boxes_xyxy[:, 2])
         y2 = np.maximum(boxes_xyxy[:, 1], boxes_xyxy[:, 3])
 
-        x1 = np.clip(x1, 0, W0 - 1)
-        y1 = np.clip(y1, 0, H0 - 1)
-        x2 = np.clip(x2, 0, W0 - 1)
-        y2 = np.clip(y2, 0, H0 - 1)
+        x1 = np.clip(x1, 0, w0 - 1)
+        y1 = np.clip(y1, 0, h0 - 1)
+        x2 = np.clip(x2, 0, w0 - 1)
+        y2 = np.clip(y2, 0, h0 - 1)
 
         boxes_xyxy = np.stack([x1, y1, x2, y2], axis=1)
         return boxes_xyxy.astype(np.float32), scores.astype(np.float32)
@@ -847,11 +831,11 @@ class GaussianGroupingDINOPredictor(BasePredictor):
         if len(inst_ids) == 0 or len(queries) == 0:
             return {}
 
-        Hp, Wp = pred_inst.shape
-        Hr, Wr = image_rgb.shape[:2]
+        hp, wp = pred_inst.shape
+        hr, wr = image_rgb.shape[:2]
 
-        sx = Wp / float(Wr)
-        sy = Hp / float(Hr)
+        sx = wp / float(wr)
+        sy = hp / float(hr)
 
         best_class = {int(iid): -1 for iid in inst_ids}
         best_score = {int(iid): 0.0 for iid in inst_ids}
@@ -873,7 +857,7 @@ class GaussianGroupingDINOPredictor(BasePredictor):
 
                 for iid in inst_ids:
                     iid = int(iid)
-                    m = (pred_inst == iid)
+                    m = pred_inst == iid
                     overlap = self.overlap_ratio_instance_in_box(m, b)
                     if overlap < self.inst_min_overlap:
                         continue
@@ -945,14 +929,14 @@ def save_summary_table(root_output_dir: str, summary_filename: str, all_reports:
     existing_reports = {}
     if os.path.exists(out_path):
         try:
-            with open(out_path, "r") as f:
+            with open(out_path, "r", encoding="utf-8") as f:
                 existing_reports = json.load(f)
         except Exception:
             existing_reports = {}
 
     existing_reports.update(convert_to_serializable(all_reports))
 
-    with open(out_path, "w") as f:
+    with open(out_path, "w", encoding="utf-8") as f:
         json.dump(existing_reports, f, indent=2)
 
     return out_path
@@ -992,23 +976,123 @@ def validate_predictor_inputs_or_raise(
 
 
 # =========================================================
+# Argument parser
+# =========================================================
+def build_argparser():
+    parser = argparse.ArgumentParser(
+        description="Run unified 2-level evaluation for GS4City, LangSplat, and Gaga + GroundingDINO."
+    )
+
+    parser.add_argument("--class_mapping_path", type=str, default=DEFAULT_CLASS_MAPPING_PATH)
+    parser.add_argument("--gt_split_root", type=str, default=DEFAULT_GT_SPLIT_ROOT)
+    parser.add_argument("--class_colors_path", type=str, default=DEFAULT_CLASS_COLORS_PATH)
+    parser.add_argument("--root_output_dir", type=str, default=DEFAULT_ROOT_OUTPUT_DIR)
+
+    parser.add_argument("--save_visualizations", action="store_true", default=DEFAULT_SAVE_VISUALIZATIONS)
+    parser.add_argument("--no_save_visualizations", action="store_false", dest="save_visualizations")
+
+    parser.add_argument("--save_cross_method_panels", action="store_true", default=DEFAULT_SAVE_CROSS_METHOD_PANELS)
+    parser.add_argument("--no_save_cross_method_panels", action="store_false", dest="save_cross_method_panels")
+
+    parser.add_argument("--num_images", type=int, default=DEFAULT_NUM_IMAGES)
+
+    parser.add_argument("--whole_building_id", type=int, default=DEFAULT_WHOLE_BUILDING_ID)
+    parser.add_argument("--whole_nonbuilding_id", type=int, default=DEFAULT_WHOLE_NONBUILDING_ID)
+    parser.add_argument(
+        "--whole_building_fine_ids",
+        type=str,
+        default=",".join(map(str, DEFAULT_WHOLE_BUILDING_FINE_IDS)),
+    )
+    parser.add_argument(
+        "--whole_nonbuild_fine_ids",
+        type=str,
+        default=",".join(map(str, DEFAULT_WHOLE_NONBUILD_FINE_IDS)),
+    )
+
+    parser.add_argument("--rgb_image_dir", type=str, default=DEFAULT_RGB_IMAGE_DIR)
+
+    parser.add_argument("--run_citygml_clip", action="store_true")
+    parser.add_argument("--skip_citygml_clip", action="store_true")
+    parser.add_argument("--city_instance_images_dir", type=str, default=DEFAULT_CITY_INSTANCE_IMAGES_DIR)
+    parser.add_argument("--city_model_root", type=str, default=DEFAULT_CITY_MODEL_ROOT)
+    parser.add_argument("--city_clip_threshold", type=float, default=DEFAULT_CITY_CLIP_THRESHOLD)
+    parser.add_argument("--city_openclip_model_name", type=str, default=DEFAULT_CITY_OPENCLIP_MODEL_NAME)
+    parser.add_argument("--city_openclip_pretrained", type=str, default=DEFAULT_CITY_OPENCLIP_PRETRAINED)
+    parser.add_argument("--citygml_class_map_path", type=str, default=DEFAULT_CITYGML_CLASS_MAP_PATH)
+
+    parser.add_argument("--run_langsplat", action="store_true")
+    parser.add_argument("--skip_langsplat", action="store_true")
+    parser.add_argument("--lang_rendered_features_dir", type=str, default=DEFAULT_LANG_RENDERED_FEATURES_DIR)
+    parser.add_argument("--lang_ae_checkpoint", type=str, default=DEFAULT_LANG_AE_CHECKPOINT)
+    parser.add_argument("--lang_whole_mask_thresh", type=float, default=DEFAULT_LANG_WHOLE_MASK_THRESH)
+    parser.add_argument("--lang_part_mask_thresh", type=float, default=DEFAULT_LANG_PART_MASK_THRESH)
+    parser.add_argument("--lang_use_softmax", action="store_true")
+    parser.add_argument("--lang_no_softmax", action="store_true")
+    parser.add_argument(
+        "--lang_encoder_dims",
+        type=str,
+        default=",".join(map(str, DEFAULT_LANG_ENCODER_DIMS)),
+    )
+    parser.add_argument(
+        "--lang_decoder_dims",
+        type=str,
+        default=",".join(map(str, DEFAULT_LANG_DECODER_DIMS)),
+    )
+
+    parser.add_argument("--run_gaga_dino", action="store_true")
+    parser.add_argument("--skip_gaga_dino", action="store_true")
+    parser.add_argument("--gaga_images_dir", type=str, default=DEFAULT_GAGA_IMAGES_DIR)
+    parser.add_argument("--gaga_pred_inst_dir", type=str, default=DEFAULT_GAGA_PRED_INST_DIR)
+    parser.add_argument("--dino_config", type=str, default=DEFAULT_DINO_CONFIG)
+    parser.add_argument("--dino_checkpoint", type=str, default=DEFAULT_DINO_CHECKPOINT)
+    parser.add_argument("--dino_box_thresh", type=float, default=DEFAULT_DINO_BOX_THRESH)
+    parser.add_argument("--dino_text_thresh", type=float, default=DEFAULT_DINO_TEXT_THRESH)
+    parser.add_argument("--dino_instance_min_overlap", type=float, default=DEFAULT_DINO_INSTANCE_MIN_OVERLAP)
+    parser.add_argument("--dino_instance_min_score", type=float, default=DEFAULT_DINO_INSTANCE_MIN_SCORE)
+    parser.add_argument("--gaga_device", type=str, default=None)
+
+    parser.add_argument("--summary_filename", type=str, default=DEFAULT_SUMMARY_FILENAME)
+    parser.add_argument(
+        "--stability_ids",
+        type=str,
+        default=",".join(map(str, DEFAULT_STABILITY_IDS)),
+    )
+
+    return parser
+
+
+# =========================================================
 # Main
 # =========================================================
 def main():
-    if not os.path.exists(CLASS_MAPPING_PATH):
-        raise FileNotFoundError(CLASS_MAPPING_PATH)
-    if not os.path.exists(GT_SPLIT_ROOT):
-        raise FileNotFoundError(GT_SPLIT_ROOT)
+    parser = build_argparser()
+    args = parser.parse_args()
 
-    class_mapping = load_json_int_keys(CLASS_MAPPING_PATH)
-    class_colors = maybe_load_colors(CLASS_COLORS_PATH)
-    citygml_class_map = maybe_load_citygml_class_map(CITYGML_CLASS_MAP_PATH)
+    run_citygml_clip = parse_bool_flag_pair(args.run_citygml_clip, args.skip_citygml_clip, DEFAULT_RUN_CITYGML_CLIP)
+    run_langsplat = parse_bool_flag_pair(args.run_langsplat, args.skip_langsplat, DEFAULT_RUN_LANGSPLAT)
+    run_gaga_dino = parse_bool_flag_pair(args.run_gaga_dino, args.skip_gaga_dino, DEFAULT_RUN_GAGA_DINO)
+    lang_use_softmax = parse_bool_flag_pair(args.lang_use_softmax, args.lang_no_softmax, DEFAULT_LANG_USE_SOFTMAX)
 
-    os.makedirs(ROOT_OUTPUT_DIR, exist_ok=True)
-    global_logger = get_logger("all_eval_validation", os.path.join(ROOT_OUTPUT_DIR, "validation.log"))
+    whole_building_fine_ids = parse_int_list(args.whole_building_fine_ids) or []
+    whole_nonbuild_fine_ids = parse_int_list(args.whole_nonbuild_fine_ids) or []
+    lang_encoder_dims = parse_int_list(args.lang_encoder_dims) or []
+    lang_decoder_dims = parse_int_list(args.lang_decoder_dims) or []
+    stability_ids = parse_int_list(args.stability_ids) or []
 
-    dir_zaha = os.path.join(GT_SPLIT_ROOT, "layer_zaha_kept")
-    dir_ai = os.path.join(GT_SPLIT_ROOT, "layer_ai_filled")
+    if not os.path.exists(args.class_mapping_path):
+        raise FileNotFoundError(args.class_mapping_path)
+    if not os.path.exists(args.gt_split_root):
+        raise FileNotFoundError(args.gt_split_root)
+
+    class_mapping = load_json_int_keys(args.class_mapping_path)
+    class_colors = maybe_load_colors(args.class_colors_path)
+    citygml_class_map = maybe_load_citygml_class_map(args.citygml_class_map_path)
+
+    os.makedirs(args.root_output_dir, exist_ok=True)
+    global_logger = get_logger("all_eval_validation", os.path.join(args.root_output_dir, "validation.log"))
+
+    dir_zaha = os.path.join(args.gt_split_root, "layer_zaha_kept")
+    dir_ai = os.path.join(args.gt_split_root, "layer_ai_filled")
 
     gt_names = require_complete_gt_pair(
         dir_zaha=dir_zaha,
@@ -1016,54 +1100,54 @@ def main():
         logger=global_logger,
     )
 
-    if NUM_IMAGES is not None:
-        gt_names = gt_names[:NUM_IMAGES]
+    if args.num_images is not None:
+        gt_names = gt_names[:args.num_images]
 
     predictors = {}
 
-    if RUN_CITYGML_CLIP:
+    if run_citygml_clip:
         predictors["citygml_clip"] = CityGMLClipPredictor(
-            instance_images_dir=CITY_INSTANCE_IMAGES_DIR,
-            model_root=CITY_MODEL_ROOT,
+            instance_images_dir=args.city_instance_images_dir,
+            model_root=args.city_model_root,
             class_mapping=class_mapping,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            clip_threshold=CITY_CLIP_THRESHOLD,
+            whole_building_fine_ids=whole_building_fine_ids,
+            clip_threshold=args.city_clip_threshold,
             citygml_class_map=citygml_class_map,
-            openclip_model_name=CITY_OPENCLIP_MODEL_NAME,
-            openclip_pretrained=CITY_OPENCLIP_PRETRAINED,
-            num_images=NUM_IMAGES,
+            openclip_model_name=args.city_openclip_model_name,
+            openclip_pretrained=args.city_openclip_pretrained,
+            num_images=args.num_images,
             logger=None,
         )
 
-    if RUN_LANGSPLAT:
+    if run_langsplat:
         predictors["langsplat"] = LangSplatPredictor(
-            rendered_features=LANG_RENDERED_FEATURES_DIR,
-            ae_checkpoint=LANG_AE_CHECKPOINT,
+            rendered_features=args.lang_rendered_features_dir,
+            ae_checkpoint=args.lang_ae_checkpoint,
             class_mapping=class_mapping,
-            whole_mask_thresh=LANG_WHOLE_MASK_THRESH,
-            part_mask_thresh=LANG_PART_MASK_THRESH,
-            use_softmax=LANG_USE_SOFTMAX,
-            encoder_dims=LANG_ENCODER_DIMS,
-            decoder_dims=LANG_DECODER_DIMS,
-            num_images=NUM_IMAGES,
+            whole_mask_thresh=args.lang_whole_mask_thresh,
+            part_mask_thresh=args.lang_part_mask_thresh,
+            use_softmax=lang_use_softmax,
+            encoder_dims=lang_encoder_dims,
+            decoder_dims=lang_decoder_dims,
+            num_images=args.num_images,
         )
 
-    if RUN_GAGA_DINO:
+    if run_gaga_dino:
         predictors["gaga_dino"] = GaussianGroupingDINOPredictor(
-            pred_inst_dir=GAGA_PRED_INST_DIR,
-            images_dir=GAGA_IMAGES_DIR,
+            pred_inst_dir=args.gaga_pred_inst_dir,
+            images_dir=args.gaga_images_dir,
             class_mapping=class_mapping,
-            dino_config=DINO_CONFIG,
-            dino_checkpoint=DINO_CHECKPOINT,
-            box_thresh=DINO_BOX_THRESH,
-            text_thresh=DINO_TEXT_THRESH,
-            inst_min_overlap=DINO_INSTANCE_MIN_OVERLAP,
-            inst_min_score=DINO_INSTANCE_MIN_SCORE,
-            num_images=NUM_IMAGES,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            dino_config=args.dino_config,
+            dino_checkpoint=args.dino_checkpoint,
+            box_thresh=args.dino_box_thresh,
+            text_thresh=args.dino_text_thresh,
+            inst_min_overlap=args.dino_instance_min_overlap,
+            inst_min_score=args.dino_instance_min_score,
+            num_images=args.num_images,
+            device=args.gaga_device or ("cuda" if torch.cuda.is_available() else "cpu"),
         )
 
-    for method_name, predictor in predictors.items():
+    for _, predictor in predictors.items():
         validate_predictor_inputs_or_raise(
             predictor=predictor,
             image_names=gt_names,
@@ -1074,181 +1158,177 @@ def main():
 
     all_reports = {}
 
-    if RUN_CITYGML_CLIP:
-        city_output_dir = os.path.join(ROOT_OUTPUT_DIR, "citygml_clip")
+    if run_citygml_clip:
+        city_output_dir = os.path.join(args.root_output_dir, "citygml_clip")
         os.makedirs(city_output_dir, exist_ok=True)
         city_logger = get_logger("citygml_clip_eval", os.path.join(city_output_dir, "eval.log"))
 
         predictor = CityGMLClipPredictor(
-            instance_images_dir=CITY_INSTANCE_IMAGES_DIR,
-            model_root=CITY_MODEL_ROOT,
+            instance_images_dir=args.city_instance_images_dir,
+            model_root=args.city_model_root,
             class_mapping=class_mapping,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            clip_threshold=CITY_CLIP_THRESHOLD,
+            whole_building_fine_ids=whole_building_fine_ids,
+            clip_threshold=args.city_clip_threshold,
             citygml_class_map=citygml_class_map,
-            openclip_model_name=CITY_OPENCLIP_MODEL_NAME,
-            openclip_pretrained=CITY_OPENCLIP_PRETRAINED,
-            num_images=NUM_IMAGES,
+            openclip_model_name=args.city_openclip_model_name,
+            openclip_pretrained=args.city_openclip_pretrained,
+            num_images=args.num_images,
             logger=city_logger,
         )
 
         evaluator = UnifiedTwoLevelEvaluator(
             predictor=predictor,
-            gt_split_root=GT_SPLIT_ROOT,
+            gt_split_root=args.gt_split_root,
             class_mapping=class_mapping,
             output_dir=city_output_dir,
             logger=city_logger,
             class_colors=class_colors,
-            whole_building_id=WHOLE_BUILDING_ID,
-            whole_nonbuilding_id=WHOLE_NONBUILDING_ID,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            whole_nonbuilding_fine_ids=WHOLE_NONBUILD_FINE_IDS,
-            save_visualizations=SAVE_VISUALIZATIONS,
+            whole_building_id=args.whole_building_id,
+            whole_nonbuilding_id=args.whole_nonbuilding_id,
+            whole_building_fine_ids=whole_building_fine_ids,
+            whole_nonbuilding_fine_ids=whole_nonbuild_fine_ids,
+            save_visualizations=args.save_visualizations,
             validated_image_names=gt_names,
         )
         all_reports["citygml_clip"] = evaluator.run()
 
-    if RUN_LANGSPLAT:
-        lang_output_dir = os.path.join(ROOT_OUTPUT_DIR, "langsplat")
+    if run_langsplat:
+        lang_output_dir = os.path.join(args.root_output_dir, "langsplat")
         os.makedirs(lang_output_dir, exist_ok=True)
         lang_logger = get_logger("langsplat_eval", os.path.join(lang_output_dir, "eval.log"))
 
         predictor = LangSplatPredictor(
-            rendered_features=LANG_RENDERED_FEATURES_DIR,
-            ae_checkpoint=LANG_AE_CHECKPOINT,
+            rendered_features=args.lang_rendered_features_dir,
+            ae_checkpoint=args.lang_ae_checkpoint,
             class_mapping=class_mapping,
-            whole_mask_thresh=LANG_WHOLE_MASK_THRESH,
-            part_mask_thresh=LANG_PART_MASK_THRESH,
-            use_softmax=LANG_USE_SOFTMAX,
-            encoder_dims=LANG_ENCODER_DIMS,
-            decoder_dims=LANG_DECODER_DIMS,
-            num_images=NUM_IMAGES,
+            whole_mask_thresh=args.lang_whole_mask_thresh,
+            part_mask_thresh=args.lang_part_mask_thresh,
+            use_softmax=lang_use_softmax,
+            encoder_dims=lang_encoder_dims,
+            decoder_dims=lang_decoder_dims,
+            num_images=args.num_images,
         )
 
         evaluator = UnifiedTwoLevelEvaluator(
             predictor=predictor,
-            gt_split_root=GT_SPLIT_ROOT,
+            gt_split_root=args.gt_split_root,
             class_mapping=class_mapping,
             output_dir=lang_output_dir,
             logger=lang_logger,
             class_colors=class_colors,
-            whole_building_id=WHOLE_BUILDING_ID,
-            whole_nonbuilding_id=WHOLE_NONBUILDING_ID,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            whole_nonbuilding_fine_ids=WHOLE_NONBUILD_FINE_IDS,
-            save_visualizations=SAVE_VISUALIZATIONS,
+            whole_building_id=args.whole_building_id,
+            whole_nonbuilding_id=args.whole_nonbuilding_id,
+            whole_building_fine_ids=whole_building_fine_ids,
+            whole_nonbuilding_fine_ids=whole_nonbuild_fine_ids,
+            save_visualizations=args.save_visualizations,
             validated_image_names=gt_names,
         )
         all_reports["langsplat"] = evaluator.run()
 
-    if RUN_GAGA_DINO:
-        gaga_output_dir = os.path.join(ROOT_OUTPUT_DIR, "gaga_dino")
+    if run_gaga_dino:
+        gaga_output_dir = os.path.join(args.root_output_dir, "gaga_dino")
         os.makedirs(gaga_output_dir, exist_ok=True)
         gaga_logger = get_logger("gaga_dino_eval", os.path.join(gaga_output_dir, "eval.log"))
 
         predictor = GaussianGroupingDINOPredictor(
-            pred_inst_dir=GAGA_PRED_INST_DIR,
-            images_dir=GAGA_IMAGES_DIR,
+            pred_inst_dir=args.gaga_pred_inst_dir,
+            images_dir=args.gaga_images_dir,
             class_mapping=class_mapping,
-            dino_config=DINO_CONFIG,
-            dino_checkpoint=DINO_CHECKPOINT,
-            box_thresh=DINO_BOX_THRESH,
-            text_thresh=DINO_TEXT_THRESH,
-            inst_min_overlap=DINO_INSTANCE_MIN_OVERLAP,
-            inst_min_score=DINO_INSTANCE_MIN_SCORE,
-            num_images=NUM_IMAGES,
-            device="cuda" if torch.cuda.is_available() else "cpu",
+            dino_config=args.dino_config,
+            dino_checkpoint=args.dino_checkpoint,
+            box_thresh=args.dino_box_thresh,
+            text_thresh=args.dino_text_thresh,
+            inst_min_overlap=args.dino_instance_min_overlap,
+            inst_min_score=args.dino_instance_min_score,
+            num_images=args.num_images,
+            device=args.gaga_device or ("cuda" if torch.cuda.is_available() else "cpu"),
         )
 
         evaluator = UnifiedTwoLevelEvaluator(
             predictor=predictor,
-            gt_split_root=GT_SPLIT_ROOT,
+            gt_split_root=args.gt_split_root,
             class_mapping=class_mapping,
             output_dir=gaga_output_dir,
             logger=gaga_logger,
             class_colors=class_colors,
-            whole_building_id=WHOLE_BUILDING_ID,
-            whole_nonbuilding_id=WHOLE_NONBUILDING_ID,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            whole_nonbuilding_fine_ids=WHOLE_NONBUILD_FINE_IDS,
-            save_visualizations=SAVE_VISUALIZATIONS,
+            whole_building_id=args.whole_building_id,
+            whole_nonbuilding_id=args.whole_nonbuilding_id,
+            whole_building_fine_ids=whole_building_fine_ids,
+            whole_nonbuilding_fine_ids=whole_nonbuild_fine_ids,
+            save_visualizations=args.save_visualizations,
             validated_image_names=gt_names,
         )
         all_reports["gaga_dino"] = evaluator.run()
 
     if all_reports:
-        summary_path = save_summary_table(ROOT_OUTPUT_DIR, SUMMARY_FILENAME, all_reports)
-        # ==========================================
-        # 【新增】：生成并保存专门的稳定性分析文件
-        # ==========================================
-        stability_ids = [101, 103, 104] # 定义你想重点查看的非建筑 ID
-        stability_results = {}
+        summary_path = save_summary_table(args.root_output_dir, args.summary_filename, all_reports)
 
+        stability_results = {}
         for method, report in all_reports.items():
-            if "part" not in report: continue
-            
+            if "part" not in report:
+                continue
+
             part_rep = report["part"]
             method_stability = {
                 "overall_part_mIoU": part_rep["mIoU"],
                 "target_classes": {}
             }
 
-            # 遍历 class_mapping 找到对应的名称
             for cid in stability_ids:
                 cname = class_mapping.get(cid)
-                if isinstance(cname, list): cname = cname[0]
-                
+                if isinstance(cname, list):
+                    cname = cname[0]
+
                 if cname in part_rep["per_class_precision"]:
                     method_stability["target_classes"][cname] = {
                         "Precision": part_rep["per_class_precision"][cname],
                         "Recall": part_rep["per_class_recall"][cname],
                         "IoU": part_rep["per_class_iou"][cname],
-                        "Counts": part_rep["per_class_raw_counts"][cname]
+                        "Counts": part_rep["per_class_raw_counts"][cname],
                     }
-            
+
             stability_results[method] = method_stability
 
-        # 保存为独立文件
-        stability_file = os.path.join(ROOT_OUTPUT_DIR, "non_building_stability_analysis.json")
-        with open(stability_file, "w") as f:
+        stability_file = os.path.join(args.root_output_dir, "non_building_stability_analysis.json")
+        with open(stability_file, "w", encoding="utf-8") as f:
             json.dump(stability_results, f, indent=4)
-        print(f"稳定性评估结果已单独保存至: {stability_file}")
-        
-    else:
-        summary_path = os.path.join(ROOT_OUTPUT_DIR, SUMMARY_FILENAME)
+        print(f"Stability analysis saved to: {stability_file}")
 
-    if SAVE_CROSS_METHOD_PANELS:
+    else:
+        summary_path = os.path.join(args.root_output_dir, args.summary_filename)
+
+    if args.save_cross_method_panels:
         method_output_dirs = {
-            "langsplat": os.path.join(ROOT_OUTPUT_DIR, "langsplat"),
-            "gaga_dino": os.path.join(ROOT_OUTPUT_DIR, "gaga_dino"),
-            "citygml_clip": os.path.join(ROOT_OUTPUT_DIR, "citygml_clip"),
+            "langsplat": os.path.join(args.root_output_dir, "langsplat"),
+            "gaga_dino": os.path.join(args.root_output_dir, "gaga_dino"),
+            "citygml_clip": os.path.join(args.root_output_dir, "citygml_clip"),
         }
 
         create_cross_method_prediction_panels(
-            root_output_dir=ROOT_OUTPUT_DIR,
-            rgb_dir=RGB_IMAGE_DIR,
-            gt_split_root=GT_SPLIT_ROOT,
+            root_output_dir=args.root_output_dir,
+            rgb_dir=args.rgb_image_dir,
+            gt_split_root=args.gt_split_root,
             class_mapping=class_mapping,
             class_colors=class_colors,
-            whole_building_id=WHOLE_BUILDING_ID,
-            whole_nonbuilding_id=WHOLE_NONBUILDING_ID,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            whole_nonbuilding_fine_ids=WHOLE_NONBUILD_FINE_IDS,
+            whole_building_id=args.whole_building_id,
+            whole_nonbuilding_id=args.whole_nonbuilding_id,
+            whole_building_fine_ids=whole_building_fine_ids,
+            whole_nonbuilding_fine_ids=whole_nonbuild_fine_ids,
             method_output_dirs=method_output_dirs,
             masked_by_gt=False,
             output_subdir="cross_method_prediction_unmasked",
         )
 
         create_cross_method_prediction_panels(
-            root_output_dir=ROOT_OUTPUT_DIR,
-            rgb_dir=RGB_IMAGE_DIR,
-            gt_split_root=GT_SPLIT_ROOT,
+            root_output_dir=args.root_output_dir,
+            rgb_dir=args.rgb_image_dir,
+            gt_split_root=args.gt_split_root,
             class_mapping=class_mapping,
             class_colors=class_colors,
-            whole_building_id=WHOLE_BUILDING_ID,
-            whole_nonbuilding_id=WHOLE_NONBUILDING_ID,
-            whole_building_fine_ids=WHOLE_BUILDING_FINE_IDS,
-            whole_nonbuilding_fine_ids=WHOLE_NONBUILD_FINE_IDS,
+            whole_building_id=args.whole_building_id,
+            whole_nonbuilding_id=args.whole_nonbuilding_id,
+            whole_building_fine_ids=whole_building_fine_ids,
+            whole_nonbuilding_fine_ids=whole_nonbuild_fine_ids,
             method_output_dirs=method_output_dirs,
             masked_by_gt=True,
             output_subdir="cross_method_prediction_masked",

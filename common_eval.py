@@ -201,7 +201,7 @@ def fuse_fine_gt_zaha_ai(zaha_map: np.ndarray, ai_map: np.ndarray) -> np.ndarray
     zaha_valid = zaha_map >= 0
 
     out[ai_valid] = ai_map[ai_valid]
-    out[zaha_valid] = zaha_map[zaha_valid]  # zaha priority
+    out[zaha_valid] = zaha_map[zaha_valid]
 
     return out
 
@@ -304,9 +304,9 @@ def compute_multiclass_metrics(pred_semantic, gt_semantic, eval_mask, class_mapp
     gt_classes = np.unique(gt_valid).tolist()
     results = {
         "class_iou": {},
-        "class_precision": {},   # 新增
-        "class_recall": {},      # 新增
-        "class_counts": {},      # 新增：存 TP, FP, FN, TN
+        "class_precision": {},
+        "class_recall": {},
+        "class_counts": {},
         "class_boundary_iou": {},
         "pixel_count": int(gt_valid.size),
         "correct_count": int((pred_valid == gt_valid).sum()),
@@ -314,12 +314,12 @@ def compute_multiclass_metrics(pred_semantic, gt_semantic, eval_mask, class_mapp
 
     for cls_id in gt_classes:
         cls_name = class_mapping.get(int(cls_id), f"class_{cls_id}")
-        if isinstance(cls_name, list): cls_name = cls_name[0]
+        if isinstance(cls_name, list):
+            cls_name = cls_name[0]
 
         gt_cls_mask_flat = (gt_valid == cls_id)
         pred_cls_mask_flat = (pred_valid == cls_id)
 
-        # --- 计算基础指标 ---
         tp = int(np.logical_and(pred_cls_mask_flat, gt_cls_mask_flat).sum())
         fp = int(np.logical_and(pred_cls_mask_flat, ~gt_cls_mask_flat).sum())
         fn = int(np.logical_and(~pred_cls_mask_flat, gt_cls_mask_flat).sum())
@@ -334,7 +334,6 @@ def compute_multiclass_metrics(pred_semantic, gt_semantic, eval_mask, class_mapp
         results["class_recall"][cls_name] = recall
         results["class_counts"][cls_name] = {"tp": tp, "fp": fp, "fn": fn, "tn": tn}
 
-        # Boundary IoU 保持原样
         pred_cls_mask_full = (pred_semantic == cls_id) & eval_mask
         gt_cls_mask_full = (gt_semantic == cls_id) & eval_mask
         biou = compute_boundary_iou_binary(pred_cls_mask_full, gt_cls_mask_full, dilation_ratio=boundary_dilation_ratio)
@@ -344,6 +343,7 @@ def compute_multiclass_metrics(pred_semantic, gt_semantic, eval_mask, class_mapp
     results["mean_boundary_iou"] = float(np.mean(list(results["class_boundary_iou"].values()))) if results["class_boundary_iou"] else 0.0
     results["pixel_acc"] = float(results["correct_count"] / results["pixel_count"])
     return results
+
 
 # =========================================================
 # Visualization helpers
@@ -478,9 +478,6 @@ def visualize_method_two_level_error(
     )
     palette = build_fixed_palette(unique_ids, class_colors)
 
-    # -------------------------
-    # Whole row
-    # -------------------------
     gt_valid_whole = gt_whole_building >= 0
 
     gt_whole_vis_masked = gt_whole_vis.copy()
@@ -499,9 +496,6 @@ def visualize_method_two_level_error(
         gt_valid_whole,
     )
 
-    # -------------------------
-    # Part row
-    # -------------------------
     gt_valid_part = gt_part >= 0
 
     gt_part_vis = gt_part.copy()
@@ -652,8 +646,8 @@ class UnifiedTwoLevelEvaluator:
         - required_paths(image_name: str) -> List[Dict]
         - predict(image_name: str) -> dict with:
             {
-              "pred_whole": np.ndarray,   # building-only binary map: {1, -1}
-              "pred_part": np.ndarray,    # fine semantic map
+              "pred_whole": np.ndarray,
+              "pred_part": np.ndarray,
             }
     """
 
@@ -1067,24 +1061,24 @@ def create_cross_method_prediction_panels(
     for image_name in tqdm(valid_names, desc=f"Saving {output_subdir}"):
         rgb_img = _load_rgb_image(rgb_map[image_name])
 
-        # 1. 加载并强制清洗：只有 JSON 里定义的 ID 才保留，背景杂质 (0) 全部变 -1
+        # Load GT and keep only IDs defined in class_mapping
         gt_zaha_raw = np.load(zaha_map[image_name]).astype(np.int32)
         gt_ai_raw = np.load(ai_map[image_name]).astype(np.int32)
-        
+
         valid_ids = list(class_mapping.keys())
         gt_zaha_raw[~np.isin(gt_zaha_raw, valid_ids)] = -1
         gt_ai_raw[~np.isin(gt_ai_raw, valid_ids)] = -1
 
-        # 2. 融合：此时 Zaha 的背景是 -1，AI 的 101/103 就能成功透传回来
+        # Fuse the cleaned GT maps
         gt_part = fuse_fine_gt_zaha_ai(gt_zaha_raw, gt_ai_raw)
 
-        # 3. 动态调色板：扫描图中所有 ID (含 101, 103) 分配颜色，解决变灰问题
+        # Build a palette for all IDs appearing in the fused map
         current_palette = build_fixed_palette(np.unique(gt_part), class_colors)
 
-        # 4. 这里的 Mask 必须严格限定在 JSON 定义的类别内
+        # Restrict the valid mask to IDs defined in class_mapping
         gt_valid_mask = np.isin(gt_part, valid_ids)
 
-        # 5. 生成左下角 GT 图 (彩色 Part 层级)
+        # Create the fused GT visualization for the part level
         gt_part_vis_map = np.full_like(gt_part, -1)
         gt_part_vis_map[gt_valid_mask] = gt_part[gt_valid_mask]
         gt_part_vis_rgb = colorize_combined_part(gt_part_vis_map, current_palette)
@@ -1125,7 +1119,7 @@ def create_cross_method_prediction_panels(
                 ),
                 "part_vis": colorize_combined_part(
                     pred_part_show,
-                    current_palette, # <-- 改成这个
+                    current_palette,
                 ),
             })
 
@@ -1143,7 +1137,6 @@ def create_cross_method_prediction_panels(
 
         fig.suptitle(image_name, fontsize=16, fontweight="bold", y=0.975)
 
-        # 第一列：上 RGB，下 融合后的最终 GT
         ax_rgb = fig.add_subplot(gs[0, 0])
         ax_rgb.imshow(rgb_img, interpolation="nearest")
         ax_rgb.axis("off")
@@ -1154,7 +1147,6 @@ def create_cross_method_prediction_panels(
         ax_gt_part.axis("off")
         ax_gt_part.set_title("Fused GT", fontsize=14, pad=4, fontweight="bold")
 
-        # 第二列：行标题
         ax_title_whole = fig.add_subplot(gs[0, 1])
         _draw_side_title(ax_title_whole, "Whole\nlevel")
 
